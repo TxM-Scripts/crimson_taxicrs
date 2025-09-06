@@ -1,11 +1,10 @@
 local QBCore = exports['qb-core']:GetCoreObject()
-
 ---@class TaxiService
 local TaxiService = {
-    activeRentals = {},   -- [src] = { companyId, plate, model, index, endTime }
-    companyFunds = {},    -- [cid] = number
-    plates = {},          -- { {companyId, plate} }
-    taxiMeters = {}       -- [plate] = { fare, total }
+    activeRentals = {},
+    companyFunds = {},
+    plates = {},
+    taxiMeters = {}
 }
 
 TaxiService.__index = TaxiService
@@ -268,10 +267,14 @@ RegisterNetEvent("crimson_taxi:server:finishOrder", function(id) TaxiNPC.Server:
 --==================== Crimson Taxi NPC (SERVER) ====================--
 
 local function syncOwners(target)
-    local rows = MySQL.query.await("SELECT company_id, citizenid, funds FROM taxi_owner")
+    local rows = MySQL.query.await("SELECT company_id, citizenid, funds, sell_price FROM taxi_owner")
     local owners = {}
     for _, r in ipairs(rows or {}) do
-        owners[r.company_id] = { citizenid = r.citizenid, funds = r.funds }
+        owners[r.company_id] = {
+            citizenid = r.citizenid,
+            funds = r.funds,
+            sell_price = r.sell_price or 0
+        }
     end
     if target then
         TriggerClientEvent("crimson_taxi:client:setOwners", target, owners)
@@ -279,6 +282,7 @@ local function syncOwners(target)
         TriggerClientEvent("crimson_taxi:client:setOwners", -1, owners)
     end
 end
+
 
 local function parseArgs(a, b, c)
     if type(a) == "number" and type(b) == "string" then
@@ -290,16 +294,18 @@ end
 
 RegisterNetEvent("crimson_taxi:server:buyCompany", function(a, b, c)
     local src, companyId, price = parseArgs(a, b, c)
-    if not src or not companyId or not price then return end
+    if not src or not companyId then return end
     local Player = QBCore.Functions.GetPlayer(src)
     if not Player then return end
+
     local citizenid = Player.PlayerData.citizenid
     local row = MySQL.single.await("SELECT * FROM taxi_owner WHERE company_id=?", {companyId})
+    local basePrice = Config.Companies[companyId] and Config.Companies[companyId].price or 500000
     if not row or not row.citizenid then
-        if Player.Functions.GetMoney("bank") < price then
+        if Player.Functions.GetMoney("bank") < basePrice then
             return notify(src, "Không đủ tiền ngân hàng!", "error")
         end
-        Player.Functions.RemoveMoney("bank", price, "Mua công ty taxi")
+        Player.Functions.RemoveMoney("bank", basePrice, "Mua công ty taxi")
 
         if row then
             MySQL.update.await("UPDATE taxi_owner SET citizenid=?, sell_price=NULL WHERE company_id=?", {citizenid, companyId})
@@ -307,7 +313,7 @@ RegisterNetEvent("crimson_taxi:server:buyCompany", function(a, b, c)
             MySQL.insert.await("INSERT INTO taxi_owner (company_id, funds, citizenid) VALUES (?, ?, ?)", {companyId, 0, citizenid})
         end
 
-        notify(src, ("Bạn đã mua công ty %s với giá $%s"):format(companyId, price), "success")
+        notify(src, ("Bạn đã mua công ty %s với giá $%s"):format(companyId, basePrice), "success")
         syncOwners()
         return
     end
@@ -316,17 +322,20 @@ RegisterNetEvent("crimson_taxi:server:buyCompany", function(a, b, c)
             return notify(src, "Không đủ tiền để mua", "error")
         end
         Player.Functions.RemoveMoney("bank", row.sell_price, "Mua lại công ty taxi")
+
         local seller = QBCore.Functions.GetPlayerByCitizenId(row.citizenid)
         if seller then
             seller.Functions.AddMoney("bank", row.sell_price, "Bán công ty taxi")
         else
             MySQL.update.await("UPDATE players SET bank = bank + ? WHERE citizenid = ?", {row.sell_price, row.citizenid})
         end
+
         MySQL.update.await("UPDATE taxi_owner SET citizenid=?, sell_price=NULL WHERE company_id=?", {citizenid, companyId})
         notify(src, ("Bạn đã mua lại công ty %s với giá $%s"):format(companyId, row.sell_price), "success")
         syncOwners()
         return
     end
+
     notify(src, "Công ty này không bán hoặc bạn đã là chủ!", "error")
 end)
 
@@ -346,23 +355,29 @@ RegisterNetEvent("crimson_taxi:server:sellCompany", function(a, b, c)
     if (row.funds or 0) > 0 then
         return notify(src, "Không thể bán khi quỹ công ty còn tiền!", "error")
     end
-
     MySQL.update.await("UPDATE taxi_owner SET sell_price=? WHERE company_id=?", {sellPrice, companyId})
+    syncOwners()
     notify(src, ("Bạn đã rao bán công ty %s với giá $%s"):format(companyId, sellPrice), "success")
 end)
 
-QBCore.Commands.Add("buytaxi", "Mua công ty taxi", {}, false, function(src)
-    TriggerEvent("crimson_taxi:server:buyCompany", src, "CRS", 500000)
-end)
 
-QBCore.Commands.Add("selltaxi", "Rao bán công ty taxi với giá mong muốn", {
-    {name = "price", help = "Giá bán"}
-}, false, function(src, args)
-    local price = tonumber(args[1])
-    if not price or price <= 0 then
-        return notify(src, "Nhập giá bán hợp lệ!", "error")
+RegisterNetEvent("crimson_taxi:server:cancelSellCompany", function(a)
+    local src, companyId = parseArgs(a)
+    if not src or not companyId then return end
+
+    local Player = QBCore.Functions.GetPlayer(src)
+    if not Player then return end
+
+    local citizenid = Player.PlayerData.citizenid
+    local row = MySQL.single.await("SELECT * FROM taxi_owner WHERE company_id=?", {companyId})
+
+    if not row or row.citizenid ~= citizenid then
+        return notify(src, "Bạn không phải chủ công ty này!", "error")
     end
-    TriggerEvent("crimson_taxi:server:sellCompany", src, "CRS", price)
+    MySQL.update.await("UPDATE taxi_owner SET sell_price=NULL WHERE company_id=?", {companyId})
+    syncOwners()
+
+    notify(src, ("Bạn đã hủy rao bán công ty %s"):format(companyId), "success")
 end)
 
 AddEventHandler("playerDropped", function()

@@ -94,20 +94,34 @@ function TaxiMeter:update()
     local pos = GetEntityCoords(veh)
     if self.lastPos then
         local d = #(pos - self.lastPos)
-        if d > 0.5 then
-            self.total = self.total + d
-            self.fare = self.fare + (self.pricePer100m / 100.0) * d
+        self.buffer = (self.buffer or 0) + d
+
+        if self.buffer >= 0.3 then
+            self.total = self.total + self.buffer
+            self.fare = self.fare + (self.pricePer100m / 100.0) * self.buffer
+            self.buffer = 0
+
             SendNUIMessage({
                 action = "updateMeter",
                 meterData = { currentFare = self.fare, distanceTraveled = self.total }
             })
-            TriggerServerEvent("crimson_taxi:server:syncMeter", GetVehicleNumberPlateText(veh), self.fare, self.total)
+            TriggerServerEvent("crimson_taxi:server:syncMeter",
+                GetVehicleNumberPlateText(veh), self.fare, self.total)
         end
     end
     self.lastPos = pos
 end
 
 --==================Doanh Nghiệp====================--
+local TaxiManager = {
+    companies = {},
+    rental = nil,
+    plates = {},
+    rentedNetIds = {}
+}
+
+TaxiManager.meter = TaxiMeter:new(Config.MeterPrice and Config.MeterPrice.per100m or 50, TaxiManager)
+
 local TaxiCompany = {}
 TaxiCompany.__index = TaxiCompany
 
@@ -123,15 +137,70 @@ function TaxiCompany:new(id, data)
 end
 
 function TaxiCompany:openBossMenu()
+    local ownerData = TaxiManager.owners and TaxiManager.owners[self.id]
+    if not ownerData then
+        notify("Dữ liệu chủ doanh nghiệp chưa được tải, vui lòng thử lại sau.", "error")
+        return
+    end
+
+    local options = {
+        {
+            title = "Quản lý quỹ",
+            icon = "dollar-sign",
+            onSelect = function()
+                TriggerServerEvent("crimson_taxi:server:openFundsMenu", self.id)
+            end
+        }
+    }
+
+    -- Nếu đang rao bán → hiển thị chỉnh giá và hủy
+    if ownerData.sell_price and ownerData.sell_price > 0 then
+        options[#options+1] = {
+            title = ("Đang rao bán: $%s"):format(ownerData.sell_price),
+            description = "Chọn để chỉnh lại giá bán",
+            icon = "fa-solid fa-handshake",
+            onSelect = function()
+                local input = lib.inputDialog("Chỉnh giá bán", {
+                    { type = "number", label = "Giá mới ($)", required = true, min = 1 }
+                })
+                if input and tonumber(input[1]) and tonumber(input[1]) > 0 then
+                    TriggerServerEvent("crimson_taxi:server:sellCompany", self.id, tonumber(input[1]))
+                end
+            end
+        }
+        options[#options+1] = {
+            title = "Huỷ rao bán",
+            icon = "fa-solid fa-ban",
+            onSelect = function()
+                TriggerServerEvent("crimson_taxi:server:cancelSellCompany", self.id)
+            end
+        }
+
+    -- Nếu chưa rao bán → hiển thị Bán Doanh Nghiệp
+    else
+        options[#options+1] = {
+            title = "Bán Doanh Nghiệp",
+            icon = "fa-solid fa-handshake",
+            onSelect = function()
+                local input = lib.inputDialog("Rao bán doanh nghiệp", {
+                    { type = "number", label = "Giá bán ($)", required = true, min = 1 }
+                })
+                if input and tonumber(input[1]) and tonumber(input[1]) > 0 then
+                    TriggerServerEvent("crimson_taxi:server:sellCompany", self.id, tonumber(input[1]))
+                end
+            end
+        }
+    end
+
     lib.registerContext({
         id = "taxi_boss_menu_" .. self.id,
-        title = (self.label or self.id) .. " - Chủ Doanh Nghiệp",
-        options = {
-            { title = "Quản lý quỹ", icon = "dollar-sign", onSelect = function() TriggerServerEvent("crimson_taxi:server:openFundsMenu", self.id) end }
-        }
+        title = (self.label or self.id),
+        options = options
     })
     lib.showContext("taxi_boss_menu_" .. self.id)
 end
+
+
 function TaxiCompany:openFundsMenu(funds)
     lib.registerContext({
         id = "taxi_funds_" .. self.id,
@@ -177,15 +246,6 @@ function TaxiCompany:openRentalMenu(rentalCache)
     lib.registerContext({ id = "taxi_rental_" .. self.id, title = "Thuê Xe - " .. (self.label or self.id), options = opts })
     lib.showContext("taxi_rental_" .. self.id)
 end
-
-local TaxiManager = {
-    companies = {},
-    rental = nil,
-    plates = {},
-    rentedNetIds = {}
-}
-
-TaxiManager.meter = TaxiMeter:new(Config.MeterPrice and Config.MeterPrice.per100m or 50, TaxiManager)
 
 function TaxiManager:getCompany(id)
     if not id then return nil end
@@ -406,17 +466,7 @@ CreateThread(function()
         end
     end
 end)
-CreateThread(function()
-    while true do
-        Wait(0)
-        if IsControlJustPressed(0, 311) then
-            local veh = GetVehiclePedIsIn(PlayerPedId(), false)
-            if veh ~= 0 and TaxiManager:isValidTaxiVehicle(veh) then
-                TaxiNPC.Client:openMenu()
-            end
-        end
-    end
-end)
+
 TaxiNPC.Client = TaxiNPC:new()
 RegisterNetEvent("crimson_taxi:client:setOrders",   function(orders) TaxiNPC.Client:setOrders(orders) end)
 RegisterNetEvent("crimson_taxi:client:updateOrder", function(order)  TaxiNPC.Client:updateOrder(order) end)
@@ -524,39 +574,79 @@ local function spawnPeds()
         for _, data in ipairs(comp.peds or {}) do
             RequestModel(data.model)
             while not HasModelLoaded(data.model) do Wait(0) end
+
             local c = data.coords
             local ped = CreatePed(4, data.model, c.x, c.y, c.z - 1, c.w, false, true)
             FreezeEntityPosition(ped, true)
             SetEntityInvincible(ped, true)
             SetBlockingOfNonTemporaryEvents(ped, true)
-            if data.scenario then TaskStartScenarioInPlace(ped, data.scenario, 0, true) end
+
+            if data.scenario then 
+                TaskStartScenarioInPlace(ped, data.scenario, 0, true) 
+            end
+
             if data.blip then
                 local blip = AddBlipForCoord(c.x, c.y, c.z)
                 SetBlipSprite(blip, 198)
                 SetBlipColour(blip, 5)
                 SetBlipScale(blip, 0.6)
-                BeginTextCommandSetBlipName("STRING"); AddTextComponentString(comp.label or "Taxi"); EndTextCommandSetBlipName(blip)
+                BeginTextCommandSetBlipName("STRING")
+                AddTextComponentString(comp.label or "Taxi")
+                EndTextCommandSetBlipName(blip)
             end
+
             exports.ox_target:addLocalEntity(ped, {
                 {
-                    name = "taxi_boss_" .. comp.id,
-                    label = "Quản lý Taxi",
-                    icon = "fa-solid fa-clipboard",
-                    onSelect = function() comp:openBossMenu() end,
-                    canInteract = function(entity, distance, coords, name)
+                    name = "taxi_menu_" .. comp.id,
+                    label = "Dịch vụ Taxi",
+                    icon = "fa-solid fa-taxi",
+                    onSelect = function()
                         local PlayerData = QBCore.Functions.GetPlayerData()
-                        if not PlayerData or not PlayerData.citizenid then return false end
-                        return TaxiManager:isOwner(PlayerData.citizenid, comp.id)
+                        local options = {}
+                        local ownerData = TaxiManager.owners and TaxiManager.owners[comp.id]
+                        if not ownerData or not ownerData.citizenid or ownerData.citizenid == "" then
+                            local basePrice = comp.price or 500000
+                            options[#options+1] = {
+                                title = ("Mua doanh nghiệp ($%s)"):format(basePrice),
+                                icon = "fa-solid fa-building",
+                                onSelect = function()
+                                    TriggerServerEvent("crimson_taxi:server:buyCompany", comp.id, basePrice)
+                                end
+                            }
+                        elseif ownerData.sell_price and ownerData.sell_price > 0 then
+                            options[#options+1] = {
+                                title = ("Mua doanh nghiệp ($%s)"):format(ownerData.sell_price),
+                                icon = "fa-solid fa-handshake",
+                                onSelect = function()
+                                    TriggerServerEvent("crimson_taxi:server:buyCompany", comp.id, ownerData.sell_price)
+                                end
+                            }
+                        end
+                        if ownerData and ownerData.citizenid and ownerData.citizenid == PlayerData.citizenid then
+                            options[#options+1] = {
+                                title = "Quản lý Taxi",
+                                icon = "fa-solid fa-clipboard",
+                                onSelect = function()
+                                    comp:openBossMenu()
+                                end
+                            }
+                        end
+                        options[#options+1] = {
+                            title = "Thuê xe Taxi",
+                            icon = "fa-solid fa-car",
+                            onSelect = function()
+                                comp:openRentalMenu(TaxiManager.rental)
+                            end
+                        }
+                        lib.registerContext({
+                            id = 'taxi_menu_' .. comp.id,
+                            title = comp.label or "Taxi",
+                            options = options
+                        })
+                        lib.showContext('taxi_menu_' .. comp.id)
                     end
-                },
-                {
-                    name = "taxi_rent_" .. comp.id,
-                    label = "Thuê xe Taxi",
-                    icon = "fa-solid fa-car",
-                    onSelect = function() comp:openRentalMenu(TaxiManager.rental) end
                 }
             })
-
         end
     end
 end
@@ -565,26 +655,33 @@ CreateThread(function() Wait(500); spawnPeds() end)
 
 CreateThread(function()
     while true do
-        Wait(0)
-        if TaxiManager.meter then
-            local veh = GetVehiclePedIsIn(PlayerPedId(), false)
-            if veh ~= 0 and TaxiManager:isValidTaxiVehicle(veh) then
-                if IsControlJustPressed(0, 19) then
-                    safeCall(function() TaxiManager.meter:reset() end)
-                    if TaxiManager.meter.running then
-                        TaxiManager.meter:stop()
-                    else
-                        TaxiManager.meter:start()
-                    end
-                end
-                if IsControlJustPressed(0, Config.Keys and Config.Keys.toggleUI or 56) then
-                    if TaxiManager.meter.enabled then
-                        TaxiManager.meter:close()
-                    else
-                        TaxiManager.meter:open(false, true)
-                    end
+        local ped = PlayerPedId()
+        local veh = GetVehiclePedIsIn(ped, false)
+        if TaxiManager.meter and veh ~= 0 and TaxiManager:isValidTaxiVehicle(veh) then
+            Wait(0)
+            if IsControlJustPressed(0, 19) then
+                safeCall(function() TaxiManager.meter:reset() end)
+                if TaxiManager.meter.running then
+                    TaxiManager.meter:stop()
+                else
+                    TaxiManager.meter:start()
                 end
             end
+            if IsControlJustPressed(0, Config.Keys and Config.Keys.toggleUI or 56) then
+                if TaxiManager.meter.enabled then
+                    TaxiManager.meter:close()
+                else
+                    TaxiManager.meter:open(false, true)
+                end
+            end
+            if IsControlJustPressed(0, 311) then
+                TaxiNPC.Client:openMenu()
+            end
+            if TaxiManager.meter.running then
+                safeCall(function() TaxiManager.meter:update() end)
+            end
+        else
+            Wait(1000)
         end
     end
 end)
@@ -620,7 +717,6 @@ CreateThread(function()
         end
     end
 end)
-
 
 function OpenBossMenu(companyId)
     local comp = TaxiManager:getCompany(companyId)

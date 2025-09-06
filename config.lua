@@ -12,6 +12,7 @@ Config.MeterPrice = {
 Config.Companies = {
     CRS = {
         label = "Công Ty Taxi CRS",
+        price = 500000, 
         blip = {
             enable = true,
             sprite = 198,
