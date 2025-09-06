@@ -28,7 +28,6 @@ function TaxiMeter:new(pricePer100m, manager)
     }, TaxiMeter)
 end
 
-
 function TaxiMeter:open(isPassenger, preserveValues)
     if self.enabled then return end
     self.enabled = true
@@ -66,22 +65,10 @@ function TaxiMeter:start()
     if not self.enabled or self.running or veh == 0 or GetPedInVehicleSeat(veh, -1) ~= ped then 
         return 
     end
-
     local plate = GetVehicleNumberPlateText(veh)
-    local plateValid = false
     local manager = self.manager
-    if manager.rentedNetIds[plate] then
-        plateValid = true
-    else
-        for _, companyPlates in pairs(manager.plates or {}) do
-            if companyPlates[plate] then
-                plateValid = true
-                break
-            end
-        end
-    end
 
-    if not plateValid then
+    if not manager.rentedNetIds[plate] then
         return notify("Xe này không phải xe taxi hợp lệ!", "error")
     end
 
@@ -89,7 +76,6 @@ function TaxiMeter:start()
     self.lastPos = GetEntityCoords(veh)
     SendNUIMessage({ action = "startMeter" })
 end
-
 
 function TaxiMeter:stop()
     local ped = PlayerPedId()
@@ -121,6 +107,7 @@ function TaxiMeter:update()
     self.lastPos = pos
 end
 
+--==================Doanh Nghiệp====================--
 local TaxiCompany = {}
 TaxiCompany.__index = TaxiCompany
 
@@ -130,7 +117,6 @@ function TaxiCompany:new(id, data)
         label = data.label,
         spawn = data.spawn,
         rentVehicles = data.rentVehicles or {},
-        bossVehicles = data.bossVehicles or {},
         peds = data.peds or {},
         blip = data.blip
     }, TaxiCompany)
@@ -141,29 +127,11 @@ function TaxiCompany:openBossMenu()
         id = "taxi_boss_menu_" .. self.id,
         title = (self.label or self.id) .. " - Chủ Doanh Nghiệp",
         options = {
-            { title = "Mua xe", icon = "car", onSelect = function() self:openBossBuyMenu() end },
             { title = "Quản lý quỹ", icon = "dollar-sign", onSelect = function() TriggerServerEvent("crimson_taxi:server:openFundsMenu", self.id) end }
         }
     })
     lib.showContext("taxi_boss_menu_" .. self.id)
 end
-
-function TaxiCompany:openBossBuyMenu()
-    local opts = {}
-    for i, v in ipairs(self.bossVehicles or {}) do
-        local owned = v.owned or false
-        opts[#opts + 1] = {
-            title = v.label .. (owned and " (Đã mua)" or ""),
-            description = not owned and ("💰 %s $"):format(v.price or 0) or nil,
-            icon = owned and "ban" or "car",
-            disabled = owned,
-            onSelect = (not owned) and function() TriggerServerEvent("crimson_taxi:server:buyBossTaxi", self.id, i) end
-        }
-    end
-    lib.registerContext({ id = "taxi_boss_buy_" .. self.id, title = "Mua Xe Chính Chủ", options = opts })
-    lib.showContext("taxi_boss_buy_" .. self.id)
-end
-
 function TaxiCompany:openFundsMenu(funds)
     lib.registerContext({
         id = "taxi_funds_" .. self.id,
@@ -191,7 +159,6 @@ function TaxiCompany:openRentalMenu(rentalCache)
             onSelect = function() TriggerServerEvent("crimson_taxi:server:returnTaxi", rentalCache.plate) end
         }
     end
-
     for i, v in ipairs(self.rentVehicles or {}) do
         opts[#opts + 1] = {
             title = v.label,
@@ -207,7 +174,6 @@ function TaxiCompany:openRentalMenu(rentalCache)
             end
         }
     end
-
     lib.registerContext({ id = "taxi_rental_" .. self.id, title = "Thuê Xe - " .. (self.label or self.id), options = opts })
     lib.showContext("taxi_rental_" .. self.id)
 end
@@ -215,7 +181,7 @@ end
 local TaxiManager = {
     companies = {},
     rental = nil,
-    plates = {},       -- { [companyId] = { [plate]=true } }
+    plates = {},
     rentedNetIds = {}
 }
 
@@ -258,14 +224,19 @@ function TaxiManager:isValidTaxiVehicle(veh)
     if self.rental and self.rental.plate == plate then
         return true
     end
-    for _, platesByComp in pairs(self.plates) do
-        if platesByComp[plate] then
-            return true
-        end
-    end
-
     return false
 end
+
+function TaxiManager:isOwner(citizenid, companyId)
+    if not self.owners or not self.owners[companyId] then return false end
+    return self.owners[companyId].citizenid == citizenid
+end
+
+RegisterNetEvent("crimson_taxi:client:setOwners", function(owners)
+    TaxiManager.owners = owners or {}
+end)
+
+
 --==================== Crimson Taxi NPC (CLIENT) ====================--
 local TaxiNPC = {}
 TaxiNPC.__index = TaxiNPC
@@ -323,7 +294,6 @@ function TaxiNPC:openMenu()
     lib.registerContext({id = 'taxi_npc_menu', title = 'Danh sách khách hàng', options = options})
     lib.showContext('taxi_npc_menu')
 end
-
 function TaxiNPC:selectOrder(id)
     id = tonumber(id)
     local order = self.orders[id]
@@ -347,7 +317,6 @@ function TaxiNPC:selectOrder(id)
     end
     TriggerServerEvent('crimson_taxi:server:takeOrder', id)
 end
-
 function TaxiNPC:onTakeResult(success, reason, id)
     id = tonumber(id)
     if success then
@@ -359,7 +328,6 @@ function TaxiNPC:onTakeResult(success, reason, id)
         end
     end
 end
-
 function TaxiNPC:updateOrder(order)
     if not order then return self:clear() end
     if order.status == "yours" then
@@ -370,19 +338,16 @@ function TaxiNPC:updateOrder(order)
         lib.notify({description="Tới điểm đón khách", type="info"})
     end
 end
-
 function TaxiNPC:createPickupBlip(coords)
     if self.pickBlip then RemoveBlip(self.pickBlip) end
     self.pickBlip = AddBlipForCoord(coords.x, coords.y, coords.z)
     SetBlipSprite(self.pickBlip, 280); SetBlipColour(self.pickBlip, 2); SetBlipRoute(self.pickBlip, true)
 end
-
 function TaxiNPC:createDropBlip(coords)
     if self.dropBlip then RemoveBlip(self.dropBlip) end
     self.dropBlip = AddBlipForCoord(coords.x, coords.y, coords.z)
     SetBlipSprite(self.dropBlip, 280); SetBlipColour(self.dropBlip, 5); SetBlipRoute(self.dropBlip, true)
 end
-
 function TaxiNPC:clear()
     self.currentOrder, self.pending, self.inProgress = nil, nil, false
     if self.ped and DoesEntityExist(self.ped) then DeleteEntity(self.ped) end
@@ -391,7 +356,6 @@ function TaxiNPC:clear()
     if self.dropBlip then RemoveBlip(self.dropBlip) end
     self.pickBlip, self.dropBlip = nil, nil
 end
-
 function TaxiNPC:onPickup()
     if not self.currentOrder or self.ped then return end
     if not IsPedInAnyVehicle(PlayerPedId(), false) then return end
@@ -407,7 +371,6 @@ function TaxiNPC:onPickup()
     self:createDropBlip(self.currentOrder.drop.coords)
     lib.notify({title="Taxi", description="Khách đã lên xe, tới điểm trả", type="info"})
 end
-
 function TaxiNPC:onDropoff()
     if not self.currentOrder or not self.ped then return end
     local veh = GetVehiclePedIsIn(PlayerPedId(), false)
@@ -419,7 +382,6 @@ function TaxiNPC:onDropoff()
     TriggerServerEvent("crimson_taxi:server:finishOrder", self.currentOrder.id)
     self:clear()
 end
-
 CreateThread(function()
     while true do
         Wait(800)
@@ -444,7 +406,6 @@ CreateThread(function()
         end
     end
 end)
-
 CreateThread(function()
     while true do
         Wait(0)
@@ -456,9 +417,7 @@ CreateThread(function()
         end
     end
 end)
-
 TaxiNPC.Client = TaxiNPC:new()
-
 RegisterNetEvent("crimson_taxi:client:setOrders",   function(orders) TaxiNPC.Client:setOrders(orders) end)
 RegisterNetEvent("crimson_taxi:client:updateOrder", function(order)  TaxiNPC.Client:updateOrder(order) end)
 RegisterNetEvent("crimson_taxi:client:selectOrder", function(id)     TaxiNPC.Client:selectOrder(id) end)
@@ -473,29 +432,9 @@ RegisterNetEvent("crimson_taxi:client:clearRental", function()
     end
     TaxiNPC.Client:clear()
 end)
---==================== Crimson Taxi NPC (CLIENT) ====================--
+--========================================--
+
 RegisterNetEvent("crimson_taxi:client:notify", function(msg, type_) notify(msg, type_) end)
-
-RegisterNetEvent("crimson_taxi:client:syncBossVehicles", function(companyId, vehicles)
-    local comp = TaxiManager:getCompany(companyId)
-    if comp then
-        comp.bossVehicles = vehicles or {}
-    end
-end)
-
-RegisterNetEvent("crimson_taxi:client:setBossPlates", function(plates)
-    TaxiManager.plates = {}
-    for _, data in ipairs(plates or {}) do
-        TaxiManager.plates[data.companyId] = TaxiManager.plates[data.companyId] or {}
-        TaxiManager.plates[data.companyId][data.plate] = true
-    end
-end)
-
-RegisterNetEvent("crimson_taxi:client:addBossPlate", function(companyId, plate)
-    TaxiManager.plates[companyId] = TaxiManager.plates[companyId] or {}
-    TaxiManager.plates[companyId][plate] = true
-end)
-
 RegisterNetEvent("crimson_taxi:client:updateRentalState", function(companyId, idx, rented)
     local comp = TaxiManager:getCompany(companyId)
     if comp and comp.rentVehicles and comp.rentVehicles[idx] then
@@ -505,31 +444,22 @@ RegisterNetEvent("crimson_taxi:client:updateRentalState", function(companyId, id
         TaxiManager:setRental(nil)
     end
 end)
-
 RegisterNetEvent("crimson_taxi:client:setRental", function(data)
     TaxiManager:setRental(data)
 end)
 RegisterNetEvent("crimson_taxi:client:clearRental", function()
     TaxiManager:setRental(nil)
 end)
-
 RegisterNetEvent("crimson_taxi:client:returnTaxiResult", function(success, reason)
     if not success then return notify(reason or "Không thể trả xe.", "error") end
     TaxiManager:setRental(nil)
     notify("Trả xe thành công.", "success")
 end)
-
 RegisterNetEvent("crimson_taxi:client:rentTaxiResult", function(success, reason)
     if not success then return notify(reason or "Không thể thuê xe.", "error") end
     notify("Thuê xe thành công.", "success")
 end)
-RegisterNetEvent("crimson_taxi:client:confirmBuyBossTaxi", function(companyId, index, owned)
-    local comp = TaxiManager:getCompany(companyId)
-    if comp and comp.bossVehicles and comp.bossVehicles[index] then comp.bossVehicles[index].owned = owned end
-    BossVehiclesByCompany[companyId] = comp.bossVehicles
-    notify("Cập nhật trạng thái xe chủ thành công.", "success")
-    safeCall(function() TaxiManager:getCompany(companyId):openBossBuyMenu() end)
-end)
+
 RegisterNetEvent("crimson_taxi:client:spawnTaxi", function(plate, model, secs, companyId)
     local spawn = (Config.Companies[companyId] and Config.Companies[companyId].spawn and Config.Companies[companyId].spawn.coords)
     if not spawn then
@@ -567,23 +497,11 @@ RegisterNetEvent("crimson_taxi:client:spawnTaxi", function(plate, model, secs, c
         end)
     end, spawn, true)
 end)
+
 RegisterNetEvent("crimson_taxi:client:deleteRentedVehicle", function(plate)
     TaxiManager:deleteRentedPlate(plate)
 end)
-RegisterNetEvent("crimson_taxi:client:spawnBossCar", function(plate, model, companyId)
-    local spawn = (Config.Companies[companyId] and Config.Companies[companyId].spawn and Config.Companies[companyId].spawn.coords)
-    if not spawn then notify("Vị trí spawn không hợp lệ.", "error"); return end
-    QBCore.Functions.SpawnVehicle(model, function(veh)
-        if not veh then return notify("Không thể tạo xe", "error") end
-        SetEntityHeading(veh, spawn.w)
-        SetVehicleNumberPlateText(veh, plate)
-        SetVehicleFuelLevel(veh, 100.0)
-        SetVehicleEngineOn(veh, true, true)
-        TaskWarpPedIntoVehicle(PlayerPedId(), veh, -1)
-        TriggerEvent("vehiclekeys:client:SetOwner", plate)
-        notify(("Xe %s đã sẵn sàng"):format(plate), "success")
-    end, spawn, true)
-end)
+
 RegisterNetEvent("crimson_taxi:client:openFundsMenu", function(companyId, funds)
     local comp = TaxiManager:getCompany(companyId)
     if comp then comp:openFundsMenu(funds) end
@@ -620,12 +538,29 @@ local function spawnPeds()
                 BeginTextCommandSetBlipName("STRING"); AddTextComponentString(comp.label or "Taxi"); EndTextCommandSetBlipName(blip)
             end
             exports.ox_target:addLocalEntity(ped, {
-                { name = "taxi_boss_" .. comp.id, label = "Quản lý Taxi", icon = "fa-solid fa-clipboard", onSelect = function() comp:openBossMenu() end, canInteract = function(entity, distance, coords, name) local PlayerData = QBCore.Functions.GetPlayerData() return PlayerData.job and PlayerData.job.name == "taxi" end },
-                { name = "taxi_rent_" .. comp.id, label = "Thuê xe Taxi", icon = "fa-solid fa-car", onSelect = function() comp:openRentalMenu(TaxiManager.rental) end }
+                {
+                    name = "taxi_boss_" .. comp.id,
+                    label = "Quản lý Taxi",
+                    icon = "fa-solid fa-clipboard",
+                    onSelect = function() comp:openBossMenu() end,
+                    canInteract = function(entity, distance, coords, name)
+                        local PlayerData = QBCore.Functions.GetPlayerData()
+                        if not PlayerData or not PlayerData.citizenid then return false end
+                        return TaxiManager:isOwner(PlayerData.citizenid, comp.id)
+                    end
+                },
+                {
+                    name = "taxi_rent_" .. comp.id,
+                    label = "Thuê xe Taxi",
+                    icon = "fa-solid fa-car",
+                    onSelect = function() comp:openRentalMenu(TaxiManager.rental) end
+                }
             })
+
         end
     end
 end
+
 CreateThread(function() Wait(500); spawnPeds() end)
 
 CreateThread(function()
@@ -666,19 +601,9 @@ CreateThread(function()
         if veh ~= 0 and not wasInVeh then
             wasInVeh = true
             local plate = GetVehicleNumberPlateText(veh)
+
             local isCompanyVehicle, vtype = false, nil
-            for cid, plates in pairs(TaxiManager.plates or {}) do
-                if plates[plate] then isCompanyVehicle, vtype = true, "boss"; break end
-            end
-            if not isCompanyVehicle then
-                for cid, comp in pairs(TaxiManager.companies) do
-                    for _, bv in ipairs(comp.bossVehicles or {}) do
-                        if bv and bv.plate == plate then isCompanyVehicle, vtype = true, "boss"; break end
-                    end
-                    if isCompanyVehicle then break end
-                end
-            end
-            if not isCompanyVehicle and TaxiManager.rentedNetIds[plate] then
+            if TaxiManager.rentedNetIds[plate] then
                 isCompanyVehicle, vtype = true, "rental"
             end
 
@@ -696,19 +621,13 @@ CreateThread(function()
     end
 end)
 
+
 function OpenBossMenu(companyId)
     local comp = TaxiManager:getCompany(companyId)
     if comp then comp:openBossMenu() end
-end
-
-function OpenBossBuyMenu(companyId)
-    local comp = TaxiManager:getCompany(companyId)
-    if comp then comp:openBossBuyMenu() end
 end
 
 function OpenRentalMenu(companyId)
     local comp = TaxiManager:getCompany(companyId)
     if comp then comp:openRentalMenu(TaxiManager.rental) end
 end
-
-exports('GetTaxiManager', function() return TaxiManager end)
